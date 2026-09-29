@@ -1,0 +1,159 @@
+"""Generate the synthetic B2B account panel.
+
+Authored synthetic demonstration data. Fictional accounts (SYN-ACCT-00001 ...), fictional
+plan tiers and regions. Not derived from any person, company, account or dataset.
+Seed 42, about 3,000 accounts observed monthly over 24 months (2024-01 to 2025-12).
+
+Churn is generated from a latent monthly hazard that depends on recent usage decline,
+support tickets, plan tier and late payment. An account with churn_month = M has activity
+rows for months signup .. M-1 and none from M onward. churn_month is empty for accounts
+that did not churn inside the panel.
+
+Usage: python tools/make_fixture.py --seed 42 [--accounts 3000] [--out examples/fixtures/v1]
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from customer_retention_lab.io import month_index, month_label  # noqa: E402
+
+PANEL_START = "2024-01"
+PANEL_END = "2025-12"
+LAST_SIGNUP = "2025-06"
+N_ACCOUNTS = 3000
+TIERS = ("tier-1", "tier-2", "tier-3")
+TIER_PROBS = (0.5, 0.35, 0.15)
+TIER_PRICE = {"tier-1": 20.0, "tier-2": 45.0, "tier-3": 90.0}
+REGIONS = ("region-A", "region-B", "region-C", "region-D")
+
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def build(seed: int, n_accounts: int = N_ACCOUNTS) -> tuple[pd.DataFrame, pd.DataFrame]:
+    rng = np.random.default_rng(seed)
+    start, end, last_signup = month_index(PANEL_START), month_index(PANEL_END), month_index(LAST_SIGNUP)
+
+    signup = rng.integers(start, last_signup + 1, size=n_accounts)
+    tier_idx = rng.choice(len(TIERS), size=n_accounts, p=TIER_PROBS)
+    tier = np.array(TIERS)[tier_idx]
+    region = rng.choice(REGIONS, size=n_accounts)
+    seats = np.maximum(1, np.round(rng.lognormal(mean=1.0 + 0.6 * tier_idx, sigma=0.5)).astype(int))
+    base_usage = rng.lognormal(mean=3.0 + 0.4 * tier_idx, sigma=0.5)
+    drift = rng.normal(-0.01, 0.08, size=n_accounts)          # per-month log-usage drift
+    ticket_rate = rng.gamma(shape=1.5, scale=0.6, size=n_accounts)
+    pay_reliability = rng.beta(12, 1.2, size=n_accounts)
+
+    acct_rows = []
+    act_rows = []
+    for i in range(n_accounts):
+        acct_id = f"SYN-ACCT-{i + 1:05d}"
+        log_usage = np.log(base_usage[i])
+        history: list[float] = []
+        churn_month = None
+        for m in range(int(signup[i]), end + 1):
+            k = m - int(signup[i])
+            if k > 0:
+                # hazard uses information up to month m-1 only
+                recent = history[-3:]
+                prior = history[-6:-3]
+                decline = 0.0
+                if len(recent) == 3 and len(prior) == 3:
+                    decline = max(0.0, float(np.mean(prior) - np.mean(recent))) / max(float(np.mean(prior)), 1.0)
+                last_tickets = act_rows[-1]["tickets"] if act_rows and act_rows[-1]["account_id"] == acct_id else 0
+                late = 1 - (act_rows[-1]["invoice_paid"] if act_rows and act_rows[-1]["account_id"] == acct_id else 1)
+                recent_tickets = sum(r["tickets"] for r in act_rows[-3:] if r["account_id"] == acct_id)
+                low_usage = 1.0 if history and history[-1] < 0.5 * base_usage[i] else 0.0
+                logit = (-4.6 + 3.0 * decline + 0.30 * last_tickets + 0.12 * recent_tickets - 0.45 * tier_idx[i]
+                         + 1.2 * late + 0.6 * (k <= 3) + 0.9 * low_usage)
+                if rng.random() < float(_sigmoid(np.array(logit))):
+                    churn_month = m
+                    break
+            log_usage += drift[i] + rng.normal(0.0, 0.15)
+            usage = float(np.round(np.exp(log_usage), 1))
+            history.append(usage)
+            tickets = int(rng.poisson(ticket_rate[i] * (1.0 + 2.0 * max(0.0, -drift[i]))))
+            paid = int(rng.random() < pay_reliability[i])
+            act_rows.append(
+                {
+                    "account_id": acct_id,
+                    "month": month_label(m),
+                    "usage": usage,
+                    "tickets": tickets,
+                    "invoice_amount": round(float(seats[i]) * TIER_PRICE[tier[i]], 2),
+                    "invoice_paid": paid,
+                }
+            )
+        acct_rows.append(
+            {
+                "account_id": acct_id,
+                "signup_month": month_label(int(signup[i])),
+                "plan_tier": tier[i],
+                "region": region[i],
+                "seats": int(seats[i]),
+                "churn_month": month_label(churn_month) if churn_month is not None else "",
+            }
+        )
+    return pd.DataFrame(acct_rows), pd.DataFrame(act_rows)
+
+
+FIXTURE_MD = """# Fixture v1
+
+Authored synthetic demonstration data. Fictional identifiers. Not derived from any
+person, company, account or dataset. Generated by `tools/make_fixture.py` seed `{seed}`,
+version v1.
+
+## accounts.csv ({n_acc} rows)
+
+One row per fictional account: `account_id` (SYN-ACCT-00001 ...), `signup_month`
+(YYYY-MM, {start} to {last_signup}), `plan_tier` (tier-1/2/3), `region` (region-A..D),
+`seats`, `churn_month` (YYYY-MM or empty when the account did not churn inside the panel
+ending {end}).
+
+## activity.csv ({n_act} rows)
+
+One row per account-month while the account is active: `month`, `usage`, `tickets`,
+`invoice_amount`, `invoice_paid` (0/1). No rows exist at or after `churn_month`.
+
+## Generating mechanism
+
+Usage follows a per-account random walk in log space. A latent monthly churn hazard
+depends on usage decline over the last six months, recent tickets, plan tier, a missed
+payment, early tenure and usage falling below half of the account's starting level. The
+hazard reads only months before the churn month. Coefficients were chosen so that the
+observation-window features carry a moderate signal; the churned share and every
+metric computed on this data are properties of the generator, not of any market.
+"""
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--accounts", type=int, default=N_ACCOUNTS)
+    ap.add_argument("--out", type=Path, default=REPO_ROOT / "examples" / "fixtures" / "v1")
+    args = ap.parse_args(argv)
+    accounts, activity = build(args.seed, args.accounts)
+    args.out.mkdir(parents=True, exist_ok=True)
+    accounts.to_csv(args.out / "accounts.csv", index=False)
+    activity.to_csv(args.out / "activity.csv", index=False)
+    (args.out / "FIXTURE.md").write_text(
+        FIXTURE_MD.format(seed=args.seed, n_acc=len(accounts), n_act=len(activity), start=PANEL_START, end=PANEL_END, last_signup=LAST_SIGNUP),
+        encoding="utf-8",
+    )
+    churned = (accounts["churn_month"] != "").sum()
+    print(f"wrote {len(accounts)} accounts ({churned} churned inside the panel) and {len(activity)} activity rows to {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,21 @@
+# Split, models and calibration.
+schema_version: 1
+seed: 42
+split:
+  # Accounts are partitioned into three disjoint groups by a seeded hash, and each group
+  # is paired with its own range of observation dates so that train < validation < test
+  # in time AND no account appears in two partitions.
+  account_fractions: {train: 0.6, validation: 0.2, test: 0.2}
+  date_fractions: {train: 0.6, validation: 0.2, test: 0.2}
+logistic:
+  C: 1.0
+  max_iter: 500
+gbm:
+  max_iter: 200
+  learning_rate: 0.05
+  max_leaf_nodes: 15
+  min_samples_leaf: 40
+calibration:
+  method: isotonic          # isotonic | platt
+  fitted_on: validation     # never the test partition
+reliability_bins: 10

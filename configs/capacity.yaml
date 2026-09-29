@@ -1,0 +1,9 @@
+# Review capacity and the assumed-benefit scenario.
+schema_version: 1
+review_capacity: 150             # cases the customer analytics team can review per observation date
+capacity_grid: [25, 50, 100, 150, 200, 300, 400]
+# The scenario multiplies each reviewed account's calibrated churn probability by an
+# assumed save rate. This is an assumption for planning, not an estimate of the effect of
+# a review; nothing in this repository measures whether reviews change outcomes.
+assumed_save_rate: 0.2
+assumed_value_per_saved_account: 1.0   # abstract units; set to 1 so outputs read as saved accounts

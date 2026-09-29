@@ -1,0 +1,11 @@
+# Point-in-time feature construction.
+schema_version: 1
+panel_start: "2024-01"          # first month in the synthetic panel
+panel_end: "2025-12"            # last month in the synthetic panel
+observation_window_months: 6    # features use months T-5 .. T inclusive
+outcome_window_months: 3        # churn within (T, T+3] months, about 90 days
+min_tenure_months: 1            # account must have at least one observed month at or before T
+observation_dates:              # monthly observation dates T; each must satisfy T + outcome window <= panel_end
+  first: "2024-06"
+  last: "2025-09"
+categorical: [plan_tier, region]
